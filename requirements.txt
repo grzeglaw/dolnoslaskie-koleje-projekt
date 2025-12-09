@@ -1,0 +1,8 @@
+Flask
+flask-cors
+pandas
+geopandas
+shapely
+fiona
+pyogrio
+networkx

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <title>Mapa stacji</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <style>
+    html,body { height:100%; margin:0; font-family: Arial, Helvetica, sans-serif; }
+
+    #topbar {
+      height: 84px;
+      padding: 8px 12px;
+      box-sizing: border-box;
+      background: #f7f7f7;
+      border-bottom: 1px solid #ddd;
+      display:flex;
+      gap:10px;
+      align-items:center;
+    }
+    #map { height: calc(100% - 140px); }
+
+    select, button, input { padding:6px 8px; font-size:14px; }
+    #controls { display:flex; gap:10px; align-items:center; }
+
+    #resultBox {
+      margin-left: 12px;
+      padding:8px;
+      background:#fff;
+      border:1px solid #ddd;
+      border-radius:6px;
+      min-width:240px;
+      font-size:14px;
+    }
+
+    #bottomPanel {
+      height: 56px;
+      padding: 8px 12px;
+      box-sizing: border-box;
+      background: #f7f7f7;
+      border-top: 1px solid #ddd;
+      overflow-y:auto;
+      font-size:14px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- TOP PANEL -->
+  <div id="topbar">
+    <div id="controls">
+      <label>Z stacji:
+        <select id="fromStation"><option>Ładuję...</option></select>
+      </label>
+
+      <label>Do stacji:
+        <select id="toStation"><option>Ładuję...</option></select>
+      </label>
+
+      <button id="routeBtn">Pokaż prostą trasę</button>
+
+      <div style="width:14px"></div>
+
+      <label>Liczba najbliższych stacji:
+        <input id="nearestN" type="number" value="1" min="1" max="20" style="width:60px"/>
+      </label>
+    </div>
+
+    <div id="resultBox">
+      <div>Status: <span id="statusText">ładowanie...</span></div>
+      <div id="info" style="margin-top:6px"></div>
+    </div>
+  </div>
+
+  <!-- MAPA -->
+  <div id="map"></div>
+
+  <!-- DOLNY PANEL NA LISTĘ TOP STACJI -->
+  <div id="bottomPanel">Kliknij na mapę, aby znaleźć najbliższe stacje.</div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const API = "http://localhost:5000";
+
+    // --- Mapa i warstwy ---
+    const map = L.map('map').setView([52.0, 19.0], 7);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19 }).addTo(map);
+
+    const stationsLayer = L.layerGroup().addTo(map);
+    const routeLayer = L.layerGroup().addTo(map);
+    const nearestLayer = L.layerGroup().addTo(map);
+
+    const fromSelect = document.getElementById('fromStation');
+    const toSelect = document.getElementById('toStation');
+    const routeBtn = document.getElementById('routeBtn');
+    const nearestNInput = document.getElementById('nearestN');
+    const statusText = document.getElementById('statusText');
+    const infoDiv = document.getElementById('info');
+    const bottomPanel = document.getElementById("bottomPanel");
+
+    let stationsList = [];
+
+    function setStatus(t) { statusText.innerText = t; }
+
+    // --- Ładowanie stacji ---
+    async function loadStations() {
+      try {
+        setStatus("pobieram stacje...");
+        const res = await fetch(API + "/stations_list");
+        stationsList = await res.json();
+
+        stationsLayer.clearLayers();
+        fromSelect.innerHTML = "";
+        toSelect.innerHTML = "";
+
+        stationsList.forEach(s => {
+          const opt1 = document.createElement('option');
+          opt1.value = s.uid;
+          opt1.textContent = s.name;
+          fromSelect.appendChild(opt1);
+          toSelect.appendChild(opt1.cloneNode(true));
+
+          L.circleMarker([s.lat, s.lon], {radius:4, color:'#0047AB', fill:true, fillOpacity:0.8})
+            .bindPopup(`<b>${s.name}</b><br>UID: ${s.uid}`)
+            .addTo(stationsLayer);
+        });
+
+        setStatus("gotowe");
+      } catch (e) {
+        console.error(e);
+        setStatus("błąd");
+      }
+    }
+
+    // --- Trasa prosta ---
+    async function drawStraightRoute() {
+      routeLayer.clearLayers();
+      infoDiv.innerText = "";
+
+      const f = fromSelect.value;
+      const t = toSelect.value;
+
+      if (!f || !t || f === t) {
+        infoDiv.innerText = "Wybierz dwie różne stacje.";
+        return;
+      }
+
+      setStatus("pobieram trasę...");
+
+      let res = await fetch(`${API}/distance?from=${f}&to=${t}`);
+      const data = await res.json();
+
+      const coords = data.line.geometry.coordinates.map(c => [c[1], c[0]]);
+      L.polyline(coords, {color:"red", weight:4}).addTo(routeLayer);
+      map.fitBounds(coords);
+
+      infoDiv.innerHTML = `<b>Trasa:</b> ${data.from.name} → ${data.to.name}<br>
+                           <b>Długość:</b> ${data.distance_km.toFixed(2)} km`;
+
+      setStatus("gotowe");
+    }
+
+    // --- Najbliższe stacje po kliknięciu ---
+    map.on("click", async e => {
+      nearestLayer.clearLayers();
+      routeLayer.clearLayers();
+
+      const lat = e.latlng.lat;
+      const lon = e.latlng.lng;
+      const n = Math.max(1, Number(nearestNInput.value));
+
+      setStatus("szukam najbliższych...");
+
+      const res = await fetch(`${API}/nearest?lat=${lat}&lon=${lon}&n=${n}`);
+      const nearest = await res.json();
+
+      if (!nearest.length) return;
+
+      const first = nearest[0];
+
+      // marker kliknięcia
+      L.circleMarker([lat, lon], {radius:6, color:'#ff6600'}).addTo(nearestLayer);
+
+      // marker najbliższej
+      L.circleMarker([first.lat, first.lon], {radius:7, color:'#008000', fill:true, fillOpacity:0.9})
+        .bindPopup(`<b>${first.name}</b><br>${first.distance_km} km`)
+        .addTo(nearestLayer)
+        .openPopup();
+
+      // linia
+      L.polyline([[lat, lon], [first.lat, first.lon]], {color:"#008000", dashArray:"6 4"}).addTo(nearestLayer);
+
+      // TOP list w dolnym panelu
+      let html = `<b>Najbliższa stacja:</b> ${first.name} (${first.distance_km} km)<br><br>`;
+      html += `<b>Lista najbliższych (${nearest.length}):</b><br>`;
+      nearest.forEach((s, i) => {
+        html += `${i + 1}. ${s.name} — ${s.distance_km} km<br>`;
+      });
+      bottomPanel.innerHTML = html;
+
+      infoDiv.innerHTML = `Najbliższa: <b>${first.name}</b> (${first.distance_km} km)`;
+      setStatus("gotowe");
+    });
+
+    routeBtn.addEventListener('click', drawStraightRoute);
+
+    loadStations();
+  </script>
+</body>
+</html>
